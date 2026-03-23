@@ -83,6 +83,7 @@ public class SceneTreePanel
         ExplorerTheme.StyleTree(_tree);
 
         _tree.ItemSelected += OnItemSelected;
+        _tree.ItemActivated += OnItemActivated;
         _tree.CellSelected += OnCellSelected;
         _tree.ItemCollapsed += OnItemCollapsed;
         Root.AddChild(_tree);
@@ -303,12 +304,35 @@ public class SceneTreePanel
         var selected = _tree.GetSelected();
         if (selected == null) return;
 
+        int col = _tree.GetSelectedColumn();
+
         string path = selected.GetMetadata(0).AsString();
         if (path == LazyPlaceholder) return;
 
+        // Select node in the inspector
         var sceneTree = ExplorerCore.SceneTree;
         var node = sceneTree?.Root?.GetNodeOrNull(path);
         ExplorerCore.SelectNode(node);
+
+        // Auto-expand when clicking on column 0 if the item has children and is collapsed.
+        // This makes the whole row clickable for expansion, not just the tiny arrow.
+        if (col == 0 && selected.Collapsed && selected.GetFirstChild() != null)
+        {
+            selected.Collapsed = false;
+            // The ItemCollapsed signal will fire and handle lazy loading
+        }
+    }
+
+    private void OnItemActivated()
+    {
+        // Double-click toggles expand/collapse
+        var selected = _tree.GetSelected();
+        if (selected == null) return;
+
+        if (selected.GetFirstChild() != null)
+        {
+            selected.Collapsed = !selected.Collapsed;
+        }
     }
 
     private void OnCellSelected()
