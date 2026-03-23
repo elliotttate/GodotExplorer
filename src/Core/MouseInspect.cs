@@ -15,6 +15,7 @@ public class MouseInspect
 
     // Overlay visuals
     private CanvasLayer? _overlayLayer;
+    private ColorRect? _clickBlocker;  // Full-screen transparent input blocker
     private ReferenceRect? _highlightRect;
     private ColorRect? _highlightFill;
     private PanelContainer? _infoBg;
@@ -51,6 +52,15 @@ public class MouseInspect
         _overlayLayer.Name = "GodotExplorer_MouseInspect";
         _overlayLayer.Layer = 129;
         _overlayLayer.Visible = false;
+
+        // Full-screen transparent blocker: captures all mouse input so clicks
+        // don't pass through to the game while inspect mode is active.
+        _clickBlocker = new ColorRect();
+        _clickBlocker.Name = "ClickBlocker";
+        _clickBlocker.Color = new Color(0, 0, 0, 0); // Fully transparent
+        _clickBlocker.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);
+        _clickBlocker.MouseFilter = Control.MouseFilterEnum.Stop;
+        _overlayLayer.AddChild(_clickBlocker);
 
         // Highlight fill (semi-transparent blue tint)
         _highlightFill = new ColorRect();
@@ -106,10 +116,17 @@ public class MouseInspect
 
         Vector2 mousePos = viewport.GetMousePosition();
 
+        // Temporarily hide our overlay so GuiGetHoveredControl sees
+        // the game's controls, not our click blocker.
+        if (_overlayLayer != null) _overlayLayer.Visible = false;
+
         // Strategy 1: UI Control nodes — GuiGetHoveredControl is fast and accurate
         var hoveredControl = viewport.GuiGetHoveredControl();
         if (hoveredControl != null && IsExplorerNode(hoveredControl))
             hoveredControl = null;
+
+        // Re-show overlay
+        if (_overlayLayer != null) _overlayLayer.Visible = true;
 
         if (hoveredControl != null)
         {
