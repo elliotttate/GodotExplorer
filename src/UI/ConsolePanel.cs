@@ -6,7 +6,9 @@ using System.Collections.Generic;
 namespace GodotExplorer.UI;
 
 /// <summary>
-/// Debug console with log viewer and command input.
+/// Debug console with two modes:
+/// - Commands: built-in commands (tree, find, inspect, etc.)
+/// - C#: live C# REPL using Roslyn scripting (evaluate expressions, access game types)
 /// </summary>
 public class ConsolePanel
 {
@@ -14,10 +16,14 @@ public class ConsolePanel
 
     private RichTextLabel _logOutput;
     private LineEdit _commandInput;
+    private Button _modeToggle;
     private readonly List<string> _commandHistory = new();
     private int _historyIndex = -1;
     private int _lineCount;
     private const int MaxLines = 1000;
+
+    private bool _csharpMode;
+    private CSharpEvaluator? _evaluator;
 
     private readonly Dictionary<string, Action<string[]>> _commands = new();
 
@@ -29,15 +35,35 @@ public class ConsolePanel
         Root.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
         Root.AddThemeConstantOverride("separation", ExplorerTheme.ItemSpacing);
 
-        // Header
+        // Header row
         var headerRow = new HBoxContainer();
-        headerRow.AddThemeConstantOverride("separation", 8);
+        headerRow.AddThemeConstantOverride("separation", 6);
         Root.AddChild(headerRow);
 
         var header = new Label();
         header.Text = "Console";
         ExplorerTheme.StyleLabel(header, ExplorerTheme.TextHeader, ExplorerTheme.FontSizeHeader);
         headerRow.AddChild(header);
+
+        // Mode toggle button
+        _modeToggle = new Button();
+        _modeToggle.Text = "Mode: Commands";
+        _modeToggle.TooltipText = "Switch between Commands and C# REPL";
+        ExplorerTheme.StyleButton(_modeToggle);
+        _modeToggle.Pressed += ToggleMode;
+        headerRow.AddChild(_modeToggle);
+
+        var spacer = new Control();
+        spacer.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+        headerRow.AddChild(spacer);
+
+        // Reset button (for C# state)
+        var resetBtn = new Button();
+        resetBtn.Text = "Reset";
+        resetBtn.TooltipText = "Reset C# evaluator state (clear variables)";
+        ExplorerTheme.StyleButton(resetBtn);
+        resetBtn.Pressed += () => { _evaluator?.Reset(); LogSuccess("C# state reset."); };
+        headerRow.AddChild(resetBtn);
 
         var clearBtn = new Button();
         clearBtn.Text = "Clear";
@@ -65,64 +91,46 @@ public class ConsolePanel
         _commandInput.PlaceholderText = "Type a command... (type 'help' for commands)";
         _commandInput.ClearButtonEnabled = true;
         ExplorerTheme.StyleLineEdit(_commandInput);
-        _commandInput.TextSubmitted += OnCommandSubmitted;
-        _commandInput.GuiInput += OnCommandInputKey;
+        _commandInput.TextSubmitted += OnInputSubmitted;
+        _commandInput.GuiInput += OnInputKey;
         Root.AddChild(_commandInput);
 
         RegisterCommands();
-        Log("[color=#5588cc]GodotExplorer Console[/color] — type 'help' for available commands.");
+        Log("[color=#5588cc]GodotExplorer Console[/color] — type [color=#66ee77]'help'[/color] for commands, or click [color=#66ee77]Mode[/color] to switch to C# REPL.");
     }
 
-    private void RegisterCommands()
+    private void ToggleMode()
     {
-        _commands["help"] = _ => ShowHelp();
-        _commands["tree"] = _ => PrintTree();
-        _commands["inspect"] = args => InspectNode(args);
-        _commands["get"] = args => GetProperty(args);
-        _commands["set"] = args => SetProperty(args);
-        _commands["find"] = args => FindNodes(args);
-        _commands["freecam"] = _ => ToggleFreecam();
-        _commands["hud"] = _ => ToggleHud();
-        _commands["count"] = _ => CountNodes();
-        _commands["groups"] = args => ListGroups(args);
-        _commands["clear"] = _ => ClearLog();
-    }
+        _csharpMode = !_csharpMode;
 
-    public void Log(string message)
-    {
-        _logOutput.AppendText(message + "\n");
-        _lineCount++;
-
-        // Trim old lines if we exceed the limit
-        if (_lineCount > MaxLines)
+        if (_csharpMode)
         {
-            _logOutput.RemoveParagraph(0);
-            _lineCount--;
+            _modeToggle.Text = "Mode: C#";
+            _commandInput.PlaceholderText = "Enter C# expression... (e.g. Tree.Root.GetChildCount())";
+
+            // Lazy-init the evaluator
+            if (_evaluator == null)
+            {
+                Log("[color=#5588cc]Initializing C# evaluator (first use may take a moment)...[/color]");
+                _evaluator = new CSharpEvaluator();
+                _evaluator.OutputReceived += (msg) => LogSuccess(msg);
+                _evaluator.ErrorReceived += (msg) => LogError(msg);
+                Log("[color=#5588cc]C# REPL ready![/color] Globals: [color=#66ee77]Tree[/color], [color=#66ee77]Root[/color], [color=#66ee77]Selected[/color], [color=#66ee77]Find(name)[/color], [color=#66ee77]FindAll(type)[/color], [color=#66ee77]N(path)[/color]");
+                Log("[color=#aaaaaa]Examples:[/color]");
+                Log("  [color=#cccccc]Tree.Root.GetChildCount()[/color]");
+                Log("  [color=#cccccc]Selected?.Name[/color]");
+                Log("  [color=#cccccc]FindAll(\"Control\").Count[/color]");
+                Log("  [color=#cccccc]var x = N(\"/root/Game\"); x.GetClass()[/color]");
+            }
+        }
+        else
+        {
+            _modeToggle.Text = "Mode: Commands";
+            _commandInput.PlaceholderText = "Type a command... (type 'help' for commands)";
         }
     }
 
-    public void LogError(string message)
-    {
-        Log($"[color=#ff6666]{message}[/color]");
-    }
-
-    public void LogWarning(string message)
-    {
-        Log($"[color=#ffdd55]{message}[/color]");
-    }
-
-    public void LogSuccess(string message)
-    {
-        Log($"[color=#66ee77]{message}[/color]");
-    }
-
-    private void ClearLog()
-    {
-        _logOutput.Clear();
-        _lineCount = 0;
-    }
-
-    private void OnCommandSubmitted(string text)
+    private void OnInputSubmitted(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return;
 
@@ -130,7 +138,41 @@ public class ConsolePanel
         _commandHistory.Add(text);
         _historyIndex = _commandHistory.Count;
 
-        Log($"[color=#aaaaaa]> {text}[/color]");
+        if (_csharpMode)
+        {
+            SubmitCSharp(text);
+        }
+        else
+        {
+            SubmitCommand(text);
+        }
+    }
+
+    private void SubmitCSharp(string code)
+    {
+        Log($"[color=#66ee77]cs>[/color] [color=#cccccc]{EscapeBBCode(code)}[/color]");
+
+        if (_evaluator == null)
+        {
+            LogError("C# evaluator not initialized.");
+            return;
+        }
+
+        // Run evaluation async, log result when done
+        _evaluator.Evaluate(code, (result) =>
+        {
+            // This callback runs on a background thread.
+            // We need to log from the main thread, so queue it.
+            ExplorerCore.SceneTree?.CallDeferred("emit_signal", "process_frame");
+            // Actually, we can just call Log directly since RichTextLabel.AppendText
+            // should be callable from any thread in practice. But to be safe:
+            Log($"  [color=#aabbdd]{EscapeBBCode(result)}[/color]");
+        });
+    }
+
+    private void SubmitCommand(string text)
+    {
+        Log($"[color=#aaaaaa]> {EscapeBBCode(text)}[/color]");
 
         var parts = text.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0) return;
@@ -145,11 +187,11 @@ public class ConsolePanel
         }
         else
         {
-            LogError($"Unknown command: '{cmd}'. Type 'help' for available commands.");
+            LogError($"Unknown command: '{cmd}'. Type 'help' for commands, or switch to C# mode.");
         }
     }
 
-    private void OnCommandInputKey(InputEvent @event)
+    private void OnInputKey(InputEvent @event)
     {
         if (@event is InputEventKey key && key.Pressed)
         {
@@ -169,11 +211,51 @@ public class ConsolePanel
         }
     }
 
-    // ==================== Commands ====================
+    private static string EscapeBBCode(string text)
+    {
+        // Escape BBCode brackets so user input doesn't break formatting
+        return text.Replace("[", "[lb]");
+    }
+
+    // ==================== Logging ====================
+
+    public void Log(string message)
+    {
+        _logOutput.AppendText(message + "\n");
+        _lineCount++;
+        if (_lineCount > MaxLines)
+        {
+            _logOutput.RemoveParagraph(0);
+            _lineCount--;
+        }
+    }
+
+    public void LogError(string message) => Log($"[color=#ff6666]{message}[/color]");
+    public void LogWarning(string message) => Log($"[color=#ffdd55]{message}[/color]");
+    public void LogSuccess(string message) => Log($"[color=#66ee77]{message}[/color]");
+    private void ClearLog() { _logOutput.Clear(); _lineCount = 0; }
+
+    // ==================== Built-in Commands ====================
+
+    private void RegisterCommands()
+    {
+        _commands["help"] = _ => ShowHelp();
+        _commands["tree"] = _ => PrintTree();
+        _commands["inspect"] = args => InspectNode(args);
+        _commands["get"] = args => GetProperty(args);
+        _commands["set"] = args => SetProperty(args);
+        _commands["find"] = args => FindNodes(args);
+        _commands["freecam"] = _ => ToggleFreecam();
+        _commands["hud"] = _ => ToggleHud();
+        _commands["count"] = _ => CountNodes();
+        _commands["groups"] = args => ListGroups(args);
+        _commands["clear"] = _ => ClearLog();
+        _commands["cs"] = _ => { if (!_csharpMode) ToggleMode(); };
+    }
 
     private void ShowHelp()
     {
-        Log("[color=#5588cc]Available commands:[/color]");
+        Log("[color=#5588cc]Commands:[/color]");
         Log("  help                    — Show this help");
         Log("  tree                    — Print scene tree");
         Log("  inspect <path>          — Select a node in the inspector");
@@ -184,6 +266,7 @@ public class ConsolePanel
         Log("  groups [group]          — List groups or nodes in a group");
         Log("  freecam                 — Toggle free camera");
         Log("  hud                     — Toggle game HUD");
+        Log("  cs                      — Switch to C# REPL mode");
         Log("  clear                   — Clear console");
     }
 
@@ -196,35 +279,24 @@ public class ConsolePanel
 
     private int PrintTreeRecursive(Node node, int depth, int remaining)
     {
-        if (remaining <= 0)
-        {
-            Log("  ... (truncated)");
-            return 0;
-        }
-
+        if (remaining <= 0) { Log("  ... (truncated)"); return 0; }
         string indent = new string(' ', depth * 2);
-        string typeName = node.GetClass();
-        Log($"  {indent}{node.Name} [{typeName}]");
+        Log($"  {indent}{node.Name} [{node.GetClass()}]");
         remaining--;
-
         foreach (var child in node.GetChildren())
         {
             if (child.Name.ToString().StartsWith("GodotExplorer")) continue;
             remaining = PrintTreeRecursive(child, depth + 1, remaining);
             if (remaining <= 0) break;
         }
-
         return remaining;
     }
 
     private void InspectNode(string[] args)
     {
         if (args.Length == 0) { LogError("Usage: inspect <node_path>"); return; }
-        string path = args[0];
-
-        var node = ExplorerCore.SceneTree?.Root?.GetNodeOrNull(path);
-        if (node == null) { LogError($"Node not found: {path}"); return; }
-
+        var node = ExplorerCore.SceneTree?.Root?.GetNodeOrNull(args[0]);
+        if (node == null) { LogError($"Node not found: {args[0]}"); return; }
         ExplorerCore.SelectNode(node);
         LogSuccess($"Selected: {node.Name} [{node.GetClass()}]");
     }
@@ -232,10 +304,8 @@ public class ConsolePanel
     private void GetProperty(string[] args)
     {
         if (args.Length < 2) { LogError("Usage: get <node_path> <property>"); return; }
-
         var node = ExplorerCore.SceneTree?.Root?.GetNodeOrNull(args[0]);
         if (node == null) { LogError($"Node not found: {args[0]}"); return; }
-
         var value = PropertyHelper.ReadValue(node, args[1]);
         Log($"  {args[1]} = {value}");
     }
@@ -243,36 +313,24 @@ public class ConsolePanel
     private void SetProperty(string[] args)
     {
         if (args.Length < 3) { LogError("Usage: set <node_path> <property> <value>"); return; }
-
         var node = ExplorerCore.SceneTree?.Root?.GetNodeOrNull(args[0]);
         if (node == null) { LogError($"Node not found: {args[0]}"); return; }
-
-        // Try to parse value as various types
         string valueStr = string.Join(' ', args[2..]);
         Variant value;
-
         if (bool.TryParse(valueStr, out bool bVal)) value = bVal;
         else if (int.TryParse(valueStr, out int iVal)) value = iVal;
         else if (float.TryParse(valueStr, out float fVal)) value = fVal;
         else value = valueStr;
-
         if (PropertyHelper.WriteValue(node, args[1], value))
             LogSuccess($"  Set {args[1]} = {value}");
-        else
-            LogError($"  Failed to set {args[1]}");
+        else LogError($"  Failed to set {args[1]}");
     }
 
     private void FindNodes(string[] args)
     {
         if (args.Length == 0) { LogError("Usage: find <pattern>"); return; }
-
         var results = ExplorerCore.SceneTree?.Root?.FindChildren($"*{args[0]}*", "", true, false);
-        if (results == null || results.Count == 0)
-        {
-            Log("  No results found.");
-            return;
-        }
-
+        if (results == null || results.Count == 0) { Log("  No results found."); return; }
         int count = 0;
         foreach (var node in results)
         {
@@ -284,25 +342,16 @@ public class ConsolePanel
         Log($"  {results.Count} total result(s).");
     }
 
-    private void ToggleFreecam()
-    {
-        // Will be wired up when FreeCamPanel is integrated
-        Log("Freecam toggle - use the Freecam panel button.");
-    }
-
+    private void ToggleFreecam() => Log("Use the Freecam button in the toolbar.");
     private void ToggleHud()
     {
         var root = ExplorerCore.SceneTree?.Root;
         if (root == null) return;
-
         int toggled = 0;
         foreach (var child in root.GetChildren())
         {
-            if (child is CanvasLayer cl && cl.Name.ToString() != "GodotExplorer")
-            {
-                cl.Visible = !cl.Visible;
-                toggled++;
-            }
+            if (child is CanvasLayer cl && !cl.Name.ToString().StartsWith("GodotExplorer"))
+            { cl.Visible = !cl.Visible; toggled++; }
         }
         LogSuccess($"Toggled {toggled} CanvasLayer(s).");
     }
@@ -311,16 +360,13 @@ public class ConsolePanel
     {
         var root = ExplorerCore.SceneTree?.Root;
         if (root == null) return;
-
-        int count = CountRecursive(root);
-        Log($"  Total nodes: {count}");
+        Log($"  Total nodes: {CountRecursive(root)}");
     }
 
     private int CountRecursive(Node node)
     {
         int count = 1;
-        foreach (var child in node.GetChildren())
-            count += CountRecursive(child);
+        foreach (var child in node.GetChildren()) count += CountRecursive(child);
         return count;
     }
 
@@ -329,19 +375,10 @@ public class ConsolePanel
         if (args.Length > 0)
         {
             var nodes = ExplorerCore.SceneTree?.GetNodesInGroup(args[0]);
-            if (nodes == null || nodes.Count == 0)
-            {
-                Log($"  No nodes in group '{args[0]}'.");
-                return;
-            }
-            foreach (var node in nodes)
-                Log($"  {node.GetPath()} [{node.GetClass()}]");
+            if (nodes == null || nodes.Count == 0) { Log($"  No nodes in group '{args[0]}'."); return; }
+            foreach (var node in nodes) Log($"  {node.GetPath()} [{node.GetClass()}]");
             Log($"  {nodes.Count} node(s) in group '{args[0]}'.");
         }
-        else
-        {
-            Log("  Usage: groups <group_name>");
-            Log("  Lists all nodes belonging to the specified group.");
-        }
+        else { Log("  Usage: groups <group_name>"); }
     }
 }

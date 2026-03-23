@@ -16,6 +16,10 @@
   <ItemGroup>
     <PackageReference Include="GodotSharp" Version="4.4.0" />
     <PackageReference Include="Lib.Harmony" Version="2.4.2" />
+    <!-- Roslyn C# Scripting is loaded dynamically at runtime via reflection,
+         not referenced at compile time. This avoids breaking the game's mod
+         loader type scanner. Deploy the Microsoft.CodeAnalysis.*.dll files
+         alongside the mod DLL or in the game's data directory. -->
   </ItemGroup>
 
   <ItemGroup>
