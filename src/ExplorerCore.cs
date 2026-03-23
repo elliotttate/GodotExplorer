@@ -16,6 +16,7 @@ public static class ExplorerCore
 
     public static SceneTree SceneTree => _sceneTree!;
     public static ExplorerUI? UI { get; private set; }
+    public static MouseInspect? MouseInspect { get; private set; }
     public static bool IsVisible { get; private set; }
 
     // Currently selected node (stored as instance ID for safety)
@@ -50,6 +51,10 @@ public static class ExplorerCore
         // This avoids relying on Godot virtual method overrides which don't work
         // in dynamically loaded mod DLLs (no source generators).
         InputPatch.Install(sceneTree);
+
+        // Create the mouse inspector
+        MouseInspect = new MouseInspect(sceneTree);
+        MouseInspect.NodePicked += (node) => SelectNode(node);
 
         // Create the UI
         UI = new ExplorerUI();

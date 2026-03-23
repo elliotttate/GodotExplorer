@@ -81,6 +81,16 @@ public class ExplorerUI
         // Tab buttons
         AddToolbarButton("Scene Tree", true, () => ToggleLeftPanel(false));
         AddToolbarButton("Search", false, () => ToggleLeftPanel(true));
+
+        // Mouse inspect button (highlight style when active)
+        _inspectBtn = new Button();
+        _inspectBtn.Text = "Inspect";
+        _inspectBtn.TooltipText = "Click elements in the game to select them";
+        _inspectBtn.ToggleMode = true;
+        ExplorerTheme.StyleButton(_inspectBtn);
+        _inspectBtn.Pressed += () => ToggleMouseInspect();
+        _toolbar.AddChild(_inspectBtn);
+
         AddToolbarButton("Freecam", false, () => ToggleFreecam());
         AddToolbarButton("Console", false, () => ToggleConsole());
 
@@ -202,10 +212,32 @@ public class ExplorerUI
         freecamDraggable.Root.Visible = false;
         _freecamContainer = freecamDraggable.Root;
         _rootControl.AddChild(_freecamContainer);
+
+        // Sync inspect button when inspect mode is toggled externally
+        var mi = GodotExplorer.Core.ExplorerCore.MouseInspect;
+        if (mi != null)
+        {
+            mi.ActiveChanged += (active) =>
+            {
+                if (_inspectBtn != null)
+                    _inspectBtn.ButtonPressed = active;
+            };
+        }
     }
 
     private PanelContainer _bottomPanel = null!;
     private PanelContainer _freecamContainer = null!;
+    private Button _inspectBtn = null!;
+
+    private void ToggleMouseInspect()
+    {
+        var mi = GodotExplorer.Core.ExplorerCore.MouseInspect;
+        if (mi != null)
+        {
+            mi.Toggle();
+            _inspectBtn.ButtonPressed = mi.IsActive;
+        }
+    }
 
     private void ToggleFreecam()
     {
