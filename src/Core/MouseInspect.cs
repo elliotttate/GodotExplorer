@@ -5,8 +5,8 @@ namespace GodotExplorer.Core;
 
 /// <summary>
 /// Mouse-based node picking. Hover over any game element to highlight it,
-/// click to select it in the inspector. Works for both Control nodes (UI)
-/// and general CanvasItem nodes (sprites, etc.).
+/// click to select it in the inspector. Finds the deepest, smallest
+/// visible CanvasItem under the cursor.
 /// </summary>
 public class MouseInspect
 {
@@ -15,7 +15,7 @@ public class MouseInspect
 
     // Overlay visuals
     private CanvasLayer? _overlayLayer;
-    private ColorRect? _clickBlocker;  // Full-screen transparent input blocker
+    private ColorRect? _clickBlocker;
     private ReferenceRect? _highlightRect;
     private ColorRect? _highlightFill;
     private PanelContainer? _infoBg;
@@ -53,16 +53,15 @@ public class MouseInspect
         _overlayLayer.Layer = 129;
         _overlayLayer.Visible = false;
 
-        // Full-screen transparent blocker: captures all mouse input so clicks
-        // don't pass through to the game while inspect mode is active.
+        // Full-screen transparent blocker to capture all mouse input
         _clickBlocker = new ColorRect();
         _clickBlocker.Name = "ClickBlocker";
-        _clickBlocker.Color = new Color(0, 0, 0, 0); // Fully transparent
+        _clickBlocker.Color = new Color(0, 0, 0, 0);
         _clickBlocker.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);
         _clickBlocker.MouseFilter = Control.MouseFilterEnum.Stop;
         _overlayLayer.AddChild(_clickBlocker);
 
-        // Highlight fill (semi-transparent blue tint)
+        // Highlight fill
         _highlightFill = new ColorRect();
         _highlightFill.Name = "HighlightFill";
         _highlightFill.Color = new Color(0.3f, 0.5f, 1.0f, 0.1f);
@@ -70,7 +69,7 @@ public class MouseInspect
         _highlightFill.Visible = false;
         _overlayLayer.AddChild(_highlightFill);
 
-        // Highlight border (ReferenceRect draws a non-filled border natively)
+        // Highlight border
         _highlightRect = new ReferenceRect();
         _highlightRect.Name = "HighlightBorder";
         _highlightRect.BorderColor = new Color(0.35f, 0.6f, 1.0f, 0.95f);
@@ -80,7 +79,7 @@ public class MouseInspect
         _highlightRect.Visible = false;
         _overlayLayer.AddChild(_highlightRect);
 
-        // Info tooltip background
+        // Info tooltip
         _infoBg = new PanelContainer();
         _infoBg.Name = "InfoBg";
         _infoBg.MouseFilter = Control.MouseFilterEnum.Ignore;
@@ -116,38 +115,69 @@ public class MouseInspect
 
         Vector2 mousePos = viewport.GetMousePosition();
 
-        // Temporarily hide our overlay so GuiGetHoveredControl sees
-        // the game's controls, not our click blocker.
-        if (_overlayLayer != null) _overlayLayer.Visible = false;
+        // Walk the entire scene tree to find the deepest, smallest visible
+        // CanvasItem whose rect contains the mouse position.
+        _bestCandidate = null;
+        _bestArea = float.MaxValue;
+        FindSmallestAtPosition(_sceneTree.Root, mousePos);
 
-        // Strategy 1: UI Control nodes — GuiGetHoveredControl is fast and accurate
-        var hoveredControl = viewport.GuiGetHoveredControl();
-        if (hoveredControl != null && IsExplorerNode(hoveredControl))
-            hoveredControl = null;
-
-        // Re-show overlay
-        if (_overlayLayer != null) _overlayLayer.Visible = true;
-
-        if (hoveredControl != null)
+        if (_bestCandidate != null)
         {
-            HighlightNode(hoveredControl, mousePos);
-            return;
+            HighlightNode(_bestCandidate, mousePos);
         }
-
-        // Strategy 2: General CanvasItem nodes — walk the tree and check bounds
-        var found = FindCanvasItemAtPosition(mousePos);
-        if (found != null)
+        else
         {
-            HighlightNode(found, mousePos);
-            return;
+            ClearHighlight();
         }
-
-        ClearHighlight();
     }
 
+    // Scratch state for the recursive search
+    private CanvasItem? _bestCandidate;
+    private float _bestArea;
+
     /// <summary>
-    /// Handle a click while mouse inspect is active. Returns true if consumed.
+    /// Recursively find the smallest visible CanvasItem containing the mouse.
+    /// "Smallest" = smallest bounding area, which picks specific leaf nodes
+    /// (buttons, labels, sprites) over their full-screen parent containers.
     /// </summary>
+    private void FindSmallestAtPosition(Node parent, Vector2 pos)
+    {
+        int count;
+        try { count = parent.GetChildCount(); }
+        catch { return; }
+
+        for (int i = 0; i < count; i++)
+        {
+            Node child;
+            try { child = parent.GetChild(i); }
+            catch { continue; }
+
+            if (!GodotObject.IsInstanceValid(child)) continue;
+            if (IsExplorerNode(child)) continue;
+
+            // Check this node
+            if (child is CanvasItem ci && ci.IsVisibleInTree())
+            {
+                Rect2 rect = GetGlobalRect(ci);
+                float area = rect.Size.X * rect.Size.Y;
+
+                // Must contain mouse and have meaningful area (skip zero-size)
+                if (area > 1f && rect.HasPoint(pos))
+                {
+                    // Prefer smaller nodes — they're more specific
+                    if (area < _bestArea)
+                    {
+                        _bestCandidate = ci;
+                        _bestArea = area;
+                    }
+                }
+            }
+
+            // Always recurse into children to find deeper matches
+            FindSmallestAtPosition(child, pos);
+        }
+    }
+
     public bool HandleClick()
     {
         if (!_active) return false;
@@ -175,10 +205,8 @@ public class MouseInspect
         if (_highlightRect == null || _highlightFill == null || _infoLabel == null || _infoBg == null)
             return;
 
-        // Get bounds
         Rect2 rect = GetGlobalRect(node);
 
-        // Position highlight
         _highlightFill.Position = rect.Position;
         _highlightFill.Size = rect.Size;
         _highlightFill.Visible = true;
@@ -203,7 +231,7 @@ public class MouseInspect
             + sizeStr
             + $"\n{path}";
 
-        // Position tooltip near cursor, keeping it on screen
+        // Position tooltip near cursor, keeping on screen
         var vpSize = _sceneTree.Root.GetVisibleRect().Size;
         _infoBg.ResetSize();
         float infoX = mousePos.X + 18;
@@ -229,7 +257,6 @@ public class MouseInspect
         if (node is Control ctrl)
             return ctrl.GetGlobalRect();
 
-        // For Sprite2D, TextureRect, etc. — estimate from texture size + transform
         var xform = node.GetGlobalTransform();
         var pos = xform.Origin;
         Vector2 size = new(64, 64);
@@ -262,55 +289,13 @@ public class MouseInspect
         return new Rect2(pos, size);
     }
 
-    /// <summary>
-    /// Find the topmost visible CanvasItem under the given position.
-    /// Walks the tree in reverse child order (last = topmost).
-    /// </summary>
-    private CanvasItem? FindCanvasItemAtPosition(Vector2 pos)
-    {
-        return FindRecursive(_sceneTree.Root, pos);
-    }
-
-    private CanvasItem? FindRecursive(Node parent, Vector2 pos)
-    {
-        int count;
-        try { count = parent.GetChildCount(); }
-        catch { return null; }
-
-        // Reverse order: last child is drawn on top
-        for (int i = count - 1; i >= 0; i--)
-        {
-            Node child;
-            try { child = parent.GetChild(i); }
-            catch { continue; }
-
-            if (!GodotObject.IsInstanceValid(child)) continue;
-            if (IsExplorerNode(child)) continue;
-
-            // Recurse deeper first (children draw over parents)
-            var deeper = FindRecursive(child, pos);
-            if (deeper != null) return deeper;
-
-            // Check this node
-            if (child is CanvasItem ci && ci.IsVisibleInTree())
-            {
-                Rect2 rect = GetGlobalRect(ci);
-                if (rect.HasArea() && rect.HasPoint(pos))
-                    return ci;
-            }
-        }
-
-        return null;
-    }
-
     private static bool IsExplorerNode(Node node)
     {
         Node? current = node;
         int depth = 0;
         while (current != null && depth < 10)
         {
-            string name = current.Name.ToString();
-            if (name.StartsWith("GodotExplorer"))
+            if (current.Name.ToString().StartsWith("GodotExplorer"))
                 return true;
             current = current.GetParent();
             depth++;
