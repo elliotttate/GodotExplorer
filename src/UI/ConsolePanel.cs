@@ -115,12 +115,12 @@ public class ConsolePanel
                 _evaluator = new CSharpEvaluator();
                 _evaluator.OutputReceived += (msg) => LogSuccess(msg);
                 _evaluator.ErrorReceived += (msg) => LogError(msg);
-                Log("[color=#5588cc]C# REPL ready![/color] Globals: [color=#66ee77]Tree[/color], [color=#66ee77]Root[/color], [color=#66ee77]Selected[/color], [color=#66ee77]Find(name)[/color], [color=#66ee77]FindAll(type)[/color], [color=#66ee77]N(path)[/color]");
+                Log("[color=#5588cc]C# REPL ready![/color] Variables: [color=#66ee77]Tree[/color], [color=#66ee77]Root[/color], [color=#66ee77]Find(name)[/color], [color=#66ee77]FindAll(type)[/color], [color=#66ee77]NodeAt(path)[/color]");
                 Log("[color=#aaaaaa]Examples:[/color]");
                 Log("  [color=#cccccc]Tree.Root.GetChildCount()[/color]");
-                Log("  [color=#cccccc]Selected?.Name[/color]");
                 Log("  [color=#cccccc]FindAll(\"Control\").Count[/color]");
-                Log("  [color=#cccccc]var x = N(\"/root/Game\"); x.GetClass()[/color]");
+                Log("  [color=#cccccc]var g = NodeAt(\"/root/Game\"); g.GetClass()[/color]");
+                Log("  [color=#cccccc]Root.GetChildren().Select(c => c.Name.ToString()).ToList()[/color]");
             }
         }
         else

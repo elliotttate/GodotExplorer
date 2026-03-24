@@ -10,63 +10,47 @@ using Godot;
 namespace GodotExplorer.Core;
 
 /// <summary>
-/// Globals object exposed to C# scripts. Provides convenient access to
-/// the game's scene tree, selected nodes, and utility methods.
-/// </summary>
-public class ScriptGlobals
-{
-    public SceneTree Tree => ExplorerCore.SceneTree;
-    public Window Root => ExplorerCore.SceneTree.Root;
-    public Node? Selected => ExplorerCore.SelectedNode;
-    public Node? N(string path) => Root.GetNodeOrNull(path);
-    public Godot.Collections.Array<Node> FindAll(string type) => Root.FindChildren("*", type, true, false);
-    public Godot.Collections.Array<Node> Find(string pattern) => Root.FindChildren($"*{pattern}*", "", true, false);
-    public void Print(object? value) => GD.Print(value?.ToString() ?? "(null)");
-    public Variant Get(string prop) => Selected?.Get(prop) ?? default;
-    public void Set(string prop, Variant value) => Selected?.Set(prop, value);
-}
-
-/// <summary>
 /// C# REPL evaluator using Roslyn scripting. Loads Roslyn assemblies lazily
-/// at runtime to avoid breaking the mod loader (which fails if it can't find
-/// Roslyn DLLs during type scanning).
+/// at runtime via reflection to avoid AssemblyLoadContext conflicts.
 ///
-/// All Roslyn types are accessed via reflection to keep them out of our
-/// assembly's type references.
+/// Instead of passing a globals object (which causes ALC cast errors),
+/// we inject a preamble script that creates convenience variables using
+/// only Godot/System types from the shared context.
 /// </summary>
 public class CSharpEvaluator
 {
-    private object? _state; // ScriptState<object> — stored as object to avoid compile-time ref
+    private object? _state; // ScriptState<object>
     private object? _options; // ScriptOptions
-    private readonly ScriptGlobals _globals;
     private readonly List<string> _history = new();
     private bool _roslynLoaded;
+    private bool _preambleRun;
 
-    // Reflected types/methods from Roslyn (resolved once on first use)
+    // Reflected Roslyn types
     private Type? _csharpScriptType;
     private Type? _scriptOptionsType;
-    private MethodInfo? _runAsyncMethod;
-    private MethodInfo? _continueWithAsyncMethod;
 
     public event Action<string>? OutputReceived;
     public event Action<string>? ErrorReceived;
     public IReadOnlyList<string> History => _history;
 
-    public CSharpEvaluator()
-    {
-        _globals = new ScriptGlobals();
-    }
-
     /// <summary>
-    /// Load Roslyn assemblies and resolve types. Returns false if Roslyn isn't available.
+    /// Preamble script that sets up convenience variables.
+    /// Uses only Godot types (shared across all ALCs) to avoid cast issues.
     /// </summary>
+    private const string Preamble = @"
+var Tree = (Godot.SceneTree)Godot.Engine.GetMainLoop();
+var Root = Tree.Root;
+Godot.Node NodeAt(string path) => Root.GetNodeOrNull(path);
+Godot.Collections.Array<Godot.Node> FindAll(string type) => Root.FindChildren(""*"", type, true, false);
+Godot.Collections.Array<Godot.Node> Find(string pattern) => Root.FindChildren(""*"" + pattern + ""*"", """", true, false);
+";
+
     public bool EnsureRoslynLoaded()
     {
         if (_roslynLoaded) return true;
 
         try
         {
-            // Find the Roslyn DLLs — check mod folder and game data folder
             string? modDir = FindModDirectory();
             string? gameDataDir = FindGameDataDirectory();
 
@@ -74,7 +58,7 @@ public class CSharpEvaluator
             if (modDir != null) searchDirs.Add(modDir);
             if (gameDataDir != null) searchDirs.Add(gameDataDir);
 
-            // Register an assembly resolver so Roslyn's transitive deps can be found
+            // Register resolver for Roslyn's transitive dependencies
             AssemblyLoadContext.Default.Resolving += (ctx, name) =>
             {
                 foreach (var dir in searchDirs)
@@ -102,10 +86,10 @@ public class CSharpEvaluator
             if (scriptingAsm == null)
             {
                 GD.PrintErr("[GodotExplorer] Microsoft.CodeAnalysis.CSharp.Scripting.dll not found!");
+                GD.PrintErr("[GodotExplorer] Place Roslyn DLLs in the mod folder or game data directory.");
                 return false;
             }
 
-            // Resolve types via reflection
             _csharpScriptType = scriptingAsm.GetType("Microsoft.CodeAnalysis.CSharp.Scripting.CSharpScript");
 
             var scriptingBaseAsm = AssemblyLoadContext.Default.LoadFromAssemblyName(
@@ -118,9 +102,7 @@ public class CSharpEvaluator
                 return false;
             }
 
-            // Build ScriptOptions
             _options = BuildScriptOptions();
-
             _roslynLoaded = true;
             GD.Print("[GodotExplorer] Roslyn C# scripting loaded successfully.");
             return true;
@@ -138,7 +120,7 @@ public class CSharpEvaluator
         var defaultProp = _scriptOptionsType!.GetProperty("Default", BindingFlags.Public | BindingFlags.Static);
         var options = defaultProp!.GetValue(null)!;
 
-        // .WithReferences(assemblies)
+        // .WithReferences — include all loaded assemblies from ALL load contexts
         var assemblies = AppDomain.CurrentDomain.GetAssemblies()
             .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location))
             .ToArray();
@@ -146,11 +128,21 @@ public class CSharpEvaluator
             .First(m => m.Name == "WithReferences" && m.GetParameters()[0].ParameterType == typeof(IEnumerable<Assembly>));
         options = withRefs.Invoke(options, new object[] { assemblies })!;
 
-        // .WithImports(namespaces)
-        string[] imports = { "System", "System.Linq", "System.Collections.Generic", "Godot" };
+        // .WithImports
+        string[] imports = {
+            "System",
+            "System.Linq",
+            "System.Collections.Generic",
+            "Godot"
+        };
         var withImports = _scriptOptionsType.GetMethods()
             .First(m => m.Name == "WithImports" && m.GetParameters()[0].ParameterType == typeof(IEnumerable<string>));
         options = withImports.Invoke(options, new object[] { imports })!;
+
+        // .WithAllowUnsafe(true)
+        var withUnsafe = _scriptOptionsType.GetMethod("WithAllowUnsafe");
+        if (withUnsafe != null)
+            options = withUnsafe.Invoke(options, new object[] { true })!;
 
         return options;
     }
@@ -158,40 +150,23 @@ public class CSharpEvaluator
     public async Task<string> EvaluateAsync(string code)
     {
         if (string.IsNullOrWhiteSpace(code)) return "";
-        if (!EnsureRoslynLoaded()) return "Error: Roslyn scripting not available.";
+        if (!EnsureRoslynLoaded()) return "Error: Roslyn scripting not available. Deploy Microsoft.CodeAnalysis.*.dll files.";
 
         _history.Add(code);
 
         try
         {
-            if (_state == null)
+            // Run the preamble first to set up convenience variables
+            if (!_preambleRun)
             {
-                // CSharpScript.RunAsync<object>(code, options, globals, typeof(ScriptGlobals))
-                var runMethod = _csharpScriptType!.GetMethods()
-                    .Where(m => m.Name == "RunAsync" && m.IsGenericMethod)
-                    .First()
-                    .MakeGenericMethod(typeof(object));
-
-                var task = (Task)runMethod.Invoke(null, new object?[] { code, _options, _globals, typeof(ScriptGlobals), default(System.Threading.CancellationToken) })!;
-                await task;
-
-                // Get the result from Task<ScriptState<object>>
-                _state = task.GetType().GetProperty("Result")!.GetValue(task);
-            }
-            else
-            {
-                // state.ContinueWithAsync<object>(code, options)
-                var continueMethod = _state.GetType().GetMethods()
-                    .Where(m => m.Name == "ContinueWithAsync" && m.IsGenericMethod)
-                    .First()
-                    .MakeGenericMethod(typeof(object));
-
-                var task = (Task)continueMethod.Invoke(_state, new object?[] { code, _options, default(System.Threading.CancellationToken) })!;
-                await task;
-                _state = task.GetType().GetProperty("Result")!.GetValue(task);
+                _state = await RunScriptAsync(Preamble, null);
+                _preambleRun = true;
             }
 
-            // Get ReturnValue from ScriptState
+            // Run user code
+            _state = await RunScriptAsync(code, _state);
+
+            // Get ReturnValue
             var returnValue = _state!.GetType().GetProperty("ReturnValue")!.GetValue(_state);
             if (returnValue != null)
             {
@@ -204,7 +179,6 @@ public class CSharpEvaluator
         }
         catch (TargetInvocationException ex) when (ex.InnerException != null)
         {
-            // Unwrap compilation or runtime errors
             var inner = ex.InnerException;
             string error;
 
@@ -229,6 +203,44 @@ public class CSharpEvaluator
         }
     }
 
+    /// <summary>
+    /// Run a script via reflection: CSharpScript.RunAsync or state.ContinueWithAsync
+    /// No globals object — avoids ALC type identity conflicts.
+    /// </summary>
+    private async Task<object> RunScriptAsync(string code, object? previousState)
+    {
+        Task task;
+
+        if (previousState == null)
+        {
+            // CSharpScript.RunAsync<object>(code, options)
+            var runMethod = _csharpScriptType!.GetMethods()
+                .Where(m => m.Name == "RunAsync" && m.IsGenericMethod)
+                .First()
+                .MakeGenericMethod(typeof(object));
+
+            // Parameters: (string code, ScriptOptions options, object globals, Type globalsType, CancellationToken)
+            task = (Task)runMethod.Invoke(null, new object?[] {
+                code, _options, null, null, default(System.Threading.CancellationToken)
+            })!;
+        }
+        else
+        {
+            // state.ContinueWithAsync<object>(code, options)
+            var continueMethod = previousState.GetType().GetMethods()
+                .Where(m => m.Name == "ContinueWithAsync" && m.IsGenericMethod)
+                .First()
+                .MakeGenericMethod(typeof(object));
+
+            task = (Task)continueMethod.Invoke(previousState, new object?[] {
+                code, _options, default(System.Threading.CancellationToken)
+            })!;
+        }
+
+        await task;
+        return task.GetType().GetProperty("Result")!.GetValue(task)!;
+    }
+
     public void Evaluate(string code, Action<string> onResult)
     {
         Task.Run(async () =>
@@ -248,9 +260,10 @@ public class CSharpEvaluator
     public void Reset()
     {
         _state = null;
+        _preambleRun = false;
         if (_roslynLoaded)
             _options = BuildScriptOptions();
-        OutputReceived?.Invoke("C# evaluator state reset.");
+        OutputReceived?.Invoke("C# state reset.");
     }
 
     private static string FormatResult(object value)
@@ -264,7 +277,7 @@ public class CSharpEvaluator
             {
                 items.Add(item?.ToString() ?? "(null)");
                 count++;
-                if (count >= 20) { items.Add($"... ({count}+ items)"); break; }
+                if (count >= 25) { items.Add($"... ({count}+ items)"); break; }
             }
             if (items.Count == 0) return "(empty collection)";
             return string.Join("\n", items);
@@ -274,7 +287,6 @@ public class CSharpEvaluator
 
     private static string? FindModDirectory()
     {
-        // Our DLL is in the mod folder
         string? myPath = typeof(CSharpEvaluator).Assembly.Location;
         if (!string.IsNullOrEmpty(myPath))
             return Path.GetDirectoryName(myPath);
@@ -287,8 +299,6 @@ public class CSharpEvaluator
         if (string.IsNullOrEmpty(exePath)) return null;
         string? exeDir = Path.GetDirectoryName(exePath);
         if (exeDir == null) return null;
-
-        // Game data is in data_sts2_windows_x86_64/ next to the exe
         string dataDir = Path.Combine(exeDir, "data_sts2_windows_x86_64");
         if (Directory.Exists(dataDir)) return dataDir;
         return exeDir;
