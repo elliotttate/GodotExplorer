@@ -241,20 +241,21 @@ Godot.Collections.Array<Godot.Node> Find(string pattern) => Root.FindChildren(""
         return task.GetType().GetProperty("Result")!.GetValue(task)!;
     }
 
-    public void Evaluate(string code, Action<string> onResult)
+    /// <summary>
+    /// Evaluate synchronously on the calling thread.
+    /// Must be called from the main thread since scripts access Godot APIs.
+    /// First evaluation may pause briefly for Roslyn compilation.
+    /// </summary>
+    public string EvaluateSync(string code)
     {
-        Task.Run(async () =>
+        try
         {
-            try
-            {
-                string result = await EvaluateAsync(code);
-                onResult(result);
-            }
-            catch (Exception ex)
-            {
-                onResult($"Error: {ex.Message}");
-            }
-        });
+            return EvaluateAsync(code).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            return $"Error: {ex.Message}";
+        }
     }
 
     public void Reset()

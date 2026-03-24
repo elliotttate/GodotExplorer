@@ -1,11 +1,12 @@
 using Godot;
 using GodotExplorer.UI;
+using GodotExplorer.MCP;
 using GodotExplorer.Patches;
 
 namespace GodotExplorer.Core;
 
 /// <summary>
-/// Singleton coordinator. Manages lifecycle, UI, selected node state, and subsystems.
+/// Singleton coordinator. Manages lifecycle, UI, selected node state, MCP server, and subsystems.
 /// </summary>
 public static class ExplorerCore
 {
@@ -13,6 +14,7 @@ public static class ExplorerCore
 
     private static SceneTree? _sceneTree;
     private static bool _initialized;
+    private static MCPServer? _mcpServer;
 
     public static SceneTree SceneTree => _sceneTree!;
     public static ExplorerUI? UI { get; private set; }
@@ -47,10 +49,13 @@ public static class ExplorerCore
 
         GD.Print($"[GodotExplorer] Initializing v{Version}...");
 
-        // Install per-frame input polling via SceneTree signal.
-        // This avoids relying on Godot virtual method overrides which don't work
-        // in dynamically loaded mod DLLs (no source generators).
+        // Install per-frame input polling and main thread dispatcher
         InputPatch.Install(sceneTree);
+        sceneTree.Connect("process_frame", Callable.From(MainThreadDispatcher.ProcessQueue));
+
+        // Start MCP server for direct Claude Code integration
+        _mcpServer = new MCPServer(27020);
+        _mcpServer.Start();
 
         // Create the mouse inspector
         MouseInspect = new MouseInspect(sceneTree);
@@ -92,6 +97,8 @@ public static class ExplorerCore
     public static void Shutdown()
     {
         if (!_initialized) return;
+
+        _mcpServer?.Stop();
 
         if (UI != null && GodotObject.IsInstanceValid(UI.RootLayer))
         {

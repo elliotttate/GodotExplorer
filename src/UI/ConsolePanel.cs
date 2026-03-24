@@ -158,16 +158,10 @@ public class ConsolePanel
             return;
         }
 
-        // Run evaluation async, log result when done
-        _evaluator.Evaluate(code, (result) =>
-        {
-            // This callback runs on a background thread.
-            // We need to log from the main thread, so queue it.
-            ExplorerCore.SceneTree?.CallDeferred("emit_signal", "process_frame");
-            // Actually, we can just call Log directly since RichTextLabel.AppendText
-            // should be callable from any thread in practice. But to be safe:
-            Log($"  [color=#aabbdd]{EscapeBBCode(result)}[/color]");
-        });
+        // Run synchronously on the main thread (required since scripts access Godot APIs).
+        // First evaluation may pause briefly for Roslyn compilation.
+        string result = _evaluator.EvaluateSync(code);
+        Log($"  [color=#aabbdd]{EscapeBBCode(result)}[/color]");
     }
 
     private void SubmitCommand(string text)
