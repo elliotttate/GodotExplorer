@@ -137,10 +137,18 @@ public class MCPServer
 
         try
         {
+            // Notifications (no id) don't get responses
+            if (request.Id == null || request.Id.Value.ValueKind == JsonValueKind.Null)
+            {
+                // Handle known notifications silently
+                return null;
+            }
+
             return request.Method switch
             {
                 "initialize" => HandleInitialize(request),
-                "initialized" => null, // Notification, no response needed
+                "initialized" => null,
+                "notifications/initialized" => null,
                 "tools/list" => HandleListTools(request),
                 "tools/call" => HandleCallTool(request),
                 "ping" => MCPHelpers.SuccessResponse(request.Id, new { }),
